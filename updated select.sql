@@ -18,18 +18,34 @@ SELECT top 100
         SELECT ShiftID,
             (
                 SELECT 
+                    MIN(ro_inner.AttMode) AS AttMode,
+                    MIN(ro_inner.DiffIN) AS DiffIN,
+                    MIN(ro_inner.DiffOUT) AS DiffOUT,
+                    MIN(ro_inner.TotalworkedMinutes) AS TotalworkedMinutes,
+                    MIN(ro_inner.RegIN) AS RegIN,
+                    MIN(ro_inner.RegOut) AS RegOut,
+                    MIN(ro_inner.PreTime) AS PreTime,
+                    MIN(ro_inner.PostTime) AS PostTime,
+                    MIN(ro_inner.FromMin) AS FromMin,
+                    MIN(ro_inner.ToMin) AS ToMin,
                     MIN(sht_inner.ShiftName) AS ShiftName,
+                    MIN(ShiftBlocks.ShiftStart) AS ShiftStart,  
+                    MAX(ShiftBlocks.ShiftEnd) AS ShiftEnd,      
                     MIN(sht_inner.InTime) AS InTime,
                     MAX(sht_inner.OutTime) AS OutTime,
                     MAX(sht_inner.TotalMinutes) AS TotalMinutes,
-                    --MIN(sht_inner.SwipesSeperatorParam) AS SwipesSeperatorParam,
+                    MIN(sht_inner.SwipesSeperatorParam) AS SwipesSeperatorParam,
                     MIN(CAST(sht_inner.ISWorkBtwnShifttime AS TINYINT)) AS ISWorkBtwnShifttime,
                     MIN(CAST(sht_inner.IsBreakApplicable AS TINYINT)) AS IsBreakApplicable,
                     MIN(CAST(sht_inner.IsNightShiftApplicable AS TINYINT)) AS IsNightShiftApplicable,
                     MIN(CAST(sht_inner.IsActive AS TINYINT)) AS IsActive,
                     MIN(sht_inner.AutoShift) AS AutoShift,
                     MIN(CAST(sht_inner.ShiftAllowance AS TINYINT)) AS ShiftAllowance,
-                     --Include shift date ranges as a nested array
+                    MIN(sbrk.BreakInTime) AS BreakInTime,  
+                    MAX(sbrk.BreakOutTime) AS BreakOutTime,
+                    MAX(sbrk.TotalBreakMinutes) AS TotalBreakMinutes,
+                    MIN(CAST(sbrk.Applicable AS TINYINT)) AS Applicable,
+                    -- Include shift date ranges as a nested array
                     (
                         SELECT 
                             MIN(Date) AS RangeStart,
@@ -70,14 +86,52 @@ SELECT top 100
                                         WHERE r.EmpCode = re.ed_empcode
                                     ) ro
                                 ) t
-                                WHERE t.ShiftID = shifts.ShiftID -- Filter for the current shift
+                                WHERE t.ShiftID = s.ShiftID -- Filter for the current shift
                             ) sr
                         ) grouped
                         GROUP BY ShiftID, ShiftGroup
                         FOR JSON PATH
                     ) AS ShiftRanges
-                FROM tna.ShiftMst AS sht_inner
-                WHERE sht_inner.ShiftId = shifts.ShiftID
+                FROM tna.Rostering AS ro_inner
+                INNER JOIN tna.ShiftMst AS sht_inner
+                    ON ro_inner.ShiftId = sht_inner.ShiftId
+                LEFT JOIN tna.ShiftBreak AS sbrk  
+                    ON sht_inner.ShiftId = sbrk.ShiftId
+                CROSS APPLY (
+                    -- Define ShiftBlocks as a derived table
+                    SELECT 
+                        MIN(sb_inner.Date) AS ShiftStart,
+                        MAX(sb_inner.Date) AS ShiftEnd
+                    FROM (
+                        SELECT 
+                            Date, 
+                            ShiftID,
+                            ShiftGroup
+                        FROM (
+                            SELECT 
+                                Date,
+                                ShiftID,
+                                ShiftChange,
+                                SUM(ShiftChange) OVER (PARTITION BY EmpCode, ShiftID ORDER BY Date ROWS UNBOUNDED PRECEDING) AS ShiftGroup
+                            FROM (
+                                SELECT 
+                                    EmpCode,
+                                    ShiftID,
+                                    Date,
+                                    CASE 
+                                        WHEN LAG(ShiftID) OVER (PARTITION BY EmpCode, ShiftID ORDER BY Date) IS NULL THEN 1 
+                                        WHEN Date > DATEADD(day, 1, LAG(Date) OVER (PARTITION BY EmpCode, ShiftID ORDER BY Date)) THEN 1
+                                        ELSE 0
+                                    END AS ShiftChange
+                                FROM tna.Rostering
+                                WHERE EmpCode = re.ed_empcode AND ShiftID = s.ShiftID
+                            ) inner_shifts
+                        ) grouped_shifts
+                    ) sb_inner
+                    GROUP BY ShiftGroup
+                ) AS ShiftBlocks
+                WHERE ro_inner.EmpCode = re.ed_empcode AND ro_inner.ShiftId = s.ShiftID
+                GROUP BY ro_inner.ShiftId
                 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
             ) AS ShiftDetails
         FROM (
@@ -85,7 +139,7 @@ SELECT top 100
             SELECT DISTINCT ShiftID
             FROM tna.Rostering
             WHERE EmpCode = re.ed_empcode
-        ) shifts
+        ) s
         FOR JSON PATH
     ) AS ShiftDetails,
 
